@@ -51,7 +51,7 @@ XSign ── download ─► unzip ─► zsign (your .p12 + profile) ─► zip
 | `XSign/App` | App entry, `AppModel` (state + update pipeline), background tasks |
 | `XSign/Services` | Downloader, IPA unpack/repack, zsign wrapper, install server, keychain/storage, notifications |
 | `XSign/Views` | SwiftUI screens: Repos, Apps, Home, Library, Settings |
-| `Packages/XSignCore` | Platform-independent logic + unit tests: source parsing, GitHub/feed catalogs, rate limits, versions, provisioning profiles, install manifest |
+| `Packages/XSignCore` | Platform-independent logic + unit tests: source parsing, GitHub/feed catalogs, rate limits, versions, provisioning profiles, install manifest, trust profile |
 | `docs/release-ipa.yml` | Workflow to drop into an app's repo so version tags publish an IPA |
 | `.github/workflows/build.yml` | CI: core tests + unsigned `XSign-unsigned.ipa` (main, tags, manual runs) |
 | `THIRD-PARTY-NOTICES.md` | Licenses of the open-source packages XSign includes |
@@ -95,7 +95,9 @@ release.
    Read-only** on your private repos.
 3. **Settings › Certificates**: import your `.p12`, its password, and a
    `.mobileprovision` that includes your device.
-4. **Apps**: tap **Get** on an app, then confirm the iOS prompt. New releases
+4. **Settings › Installer**: download the profile, install it in the Settings
+   app, and turn it on under General › About › Certificate Trust Settings.
+5. **Apps**: tap **Get** on an app, then confirm the iOS prompt. New releases
    show up on **Home** as updates.
 
 ## How "installed version" works
@@ -110,9 +112,12 @@ open the app's page and use **Versions › ⋯ › Mark as Installed**.
 - The signing certificate decides everything else. With a free Apple ID,
   profiles expire after 7 days and allow 3 apps. A paid developer account gets
   a year and wildcard profiles.
-- The install server needs a public TLS certificate for a hostname that
-  resolves to `127.0.0.1`. XSign downloads one from backloop.dev, as Feather
-  does. If installs stop working, refresh it in Settings.
+- iOS only installs from HTTPS addresses it trusts. XSign makes its own root
+  certificate on the device, signs a server certificate for `localhost` and
+  `local.backloop.dev` with it, and discards the root's private key, so the
+  root can't vouch for anything else. You trust it once (Settings ›
+  Installer). backloop.dev's shared certificate was revoked and the service
+  discontinued in September 2026.
 - Background checks run when iOS allows them. Opening XSign always checks.
 - Icons are taken from loose PNGs in the bundle. Apps whose icons exist only in
   `Assets.car` get a coloured monogram instead.

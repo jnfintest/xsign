@@ -55,7 +55,7 @@ struct HomeView: View {
 
     @ViewBuilder
     private var setupCard: some View {
-        if model.sources.isEmpty || model.activeCertificate == nil {
+        if model.sources.isEmpty || model.activeCertificate == nil || model.installTrusted == false {
             Card {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Get set up").font(.title3.bold())
@@ -65,6 +65,8 @@ struct HomeView: View {
                          detail: ".p12 + .mobileprovision, in Settings.") { model.selectedTab = .settings }
                     step(done: model.hasGitHubToken, title: "Add a GitHub token (private repos)",
                          detail: "Settings › GitHub.") { model.selectedTab = .settings }
+                    step(done: model.installTrusted == true, title: "Trust the install certificate",
+                         detail: "Once, in Settings › Installer.") { model.selectedTab = .settings }
                 }
             }
         } else if let certificate = model.activeCertificate {

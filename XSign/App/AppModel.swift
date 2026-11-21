@@ -50,6 +50,7 @@ enum InstallError: LocalizedError {
     case timedOut
     case noSSL(String)
     case missingOriginal
+    case noPrompt(trusted: Bool)
 
     var errorDescription: String? {
         switch self {
@@ -57,6 +58,10 @@ enum InstallError: LocalizedError {
         case .timedOut: return "The install wasn't confirmed in time. Try again."
         case .noSSL(let reason): return "Couldn't fetch the local install certificate: \(reason)"
         case .missingOriginal: return "The original IPA is missing. Get the app again from its source."
+        case .noPrompt(let trusted):
+            return trusted
+                ? "iOS didn't ask to install. Something on this iPhone may block local addresses (a VPN, DNS filter or content blocker). Turn it off and try again."
+                : "iOS didn't ask to install because it doesn't trust XSign's install certificate yet. Open Settings › Installer in XSign and follow the steps once, then try again."
         }
     }
 }
@@ -108,12 +113,15 @@ final class AppModel: ObservableObject {
     @Published private(set) var phases: [String: JobPhase] = [:]
     @Published private(set) var refreshingSources: Set<UUID> = []
     @Published var sslPack: SSLPack?
+    /// Whether iOS trusts the install certificate; nil until checked.
+    @Published private(set) var installTrusted: Bool?
     @Published var selectedTab: AppTab = .home
     /// Set by deep links (`xsign://add?url=…`) to open the add-source sheet.
     @Published var pendingSourceInput: String?
 
     private var jobs: [String: Task<Void, Never>] = [:]
     private var servers: [String: InstallServer] = [:]
+    private var profileServer: ProfileServer?
     /// Continuations waiting for iOS to fetch the IPA, tagged with a token so a
     /// stale timeout can't cancel a newer attempt.
     private var installWaiters: [String: (token: UUID, continuation: CheckedContinuation<Void, Error>)] = [:]
@@ -492,9 +500,23 @@ final class AppModel: ObservableObject {
         try server.start()
         servers[key] = server
 
-        guard await server.openInstaller() else {
+        // iOS fetches the manifest before it shows its prompt. If it doesn't
+        // within a few seconds, that name didn't work: try the next one.
+        var asked = false
+        for index in SSLPack.hostnames.indices where !asked {
+            guard await server.openInstaller(hostIndex: index) else {
+                servers.removeValue(forKey: key)?.stop()
+                throw InstallError.couldNotOpenInstaller
+            }
+            for _ in 0..<24 where !server.manifestFetched.isSet {
+                try await Task.sleep(nanoseconds: 500_000_000)
+            }
+            asked = server.manifestFetched.isSet
+        }
+        guard asked else {
             servers.removeValue(forKey: key)?.stop()
-            throw InstallError.couldNotOpenInstaller
+            await refreshInstallTrust()
+            throw InstallError.noPrompt(trusted: installTrusted ?? false)
         }
 
         // Wait until iOS has pulled the IPA (or give up after 10 minutes).
@@ -638,19 +660,41 @@ final class AppModel: ObservableObject {
     // MARK: - SSL
 
     func ensureSSLPack() async throws -> SSLPack {
-        if let sslPack { return sslPack }
-        return try await refreshSSLPack()
+        if let sslPack, !sslPack.isExpired { return sslPack }
+        return try await newSSLPack()
     }
 
+    /// Makes a new install certificate. iOS has to be told to trust it again.
     @discardableResult
-    func refreshSSLPack() async throws -> SSLPack {
+    func newSSLPack() async throws -> SSLPack {
         do {
-            let pack = try await SSLPack.download()
+            let pack = try await Task.detached(priority: .userInitiated) { try SSLPack.generate() }.value
             sslPack = pack
+            installTrusted = false
             return pack
         } catch {
             throw InstallError.noSSL(error.localizedDescription)
         }
+    }
+
+    func refreshInstallTrust() async {
+        guard let pack = sslPack else { installTrusted = false; return }
+        installTrusted = await Task.detached(priority: .utility) { pack.isTrusted() }.value
+    }
+
+    /// Starts serving the trust profile and returns the address Safari opens.
+    func startTrustProfileServer() async throws -> URL {
+        let pack = try await ensureSSLPack()
+        profileServer?.stop()
+        let server = ProfileServer(profile: try pack.mobileconfig())
+        try server.start()
+        profileServer = server
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 300 * 1_000_000_000)
+            if self?.profileServer === server { self?.profileServer = nil }
+            server.stop()
+        }
+        return server.url
     }
 
     // MARK: - Certificates

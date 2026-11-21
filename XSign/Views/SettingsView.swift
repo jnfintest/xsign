@@ -1,3 +1,4 @@
+import SafariServices
 import SwiftUI
 import UniformTypeIdentifiers
 import XSignCore
@@ -20,8 +21,8 @@ struct SettingsView: View {
                         value: model.hasGitHubToken ? "Token set" : "No token") { GitHubSettingsView() }
                     row("Updates", icon: "arrow.down.circle.fill", tint: Theme.accent,
                         value: model.settings.includeBetaUpdates ? "Incl. betas" : "Stable") { UpdateSettingsView() }
-                    row("Installer", icon: "lock.shield.fill", tint: .blue,
-                        value: model.sslPack == nil ? "Not set up" : "Ready") { InstallerSettingsView() }
+                    row("Installer", icon: "lock.shield.fill", tint: model.installTrusted == true ? .blue : .orange,
+                        value: model.installTrusted == true ? "Ready" : "Set up") { InstallerSettingsView() }
                     row("Homelab", icon: "server.rack", tint: .gray, value: "") { HomelabSettingsView() }
                 }
                 Section {
@@ -231,36 +232,64 @@ struct InstallerSettingsView: View {
     @EnvironmentObject private var model: AppModel
     @State private var busy = false
     @State private var message: String?
+    @State private var safari: SafariLink?
+    @State private var confirmNew = false
 
     var body: some View {
         Form {
             Section {
                 HStack {
-                    Text("Local HTTPS host")
+                    Text("Status")
                     Spacer()
-                    Text(model.sslPack?.hostname ?? "Not downloaded").font(Theme.mono(.caption)).foregroundStyle(.secondary)
+                    Text(statusText).font(Theme.mono(.caption, weight: .semibold)).foregroundStyle(statusTint)
                 }
-                Button {
-                    Task {
-                        busy = true
-                        defer { busy = false }
-                        do {
-                            let pack = try await model.refreshSSLPack()
-                            message = "Updated certificate for \(pack.hostname)."
-                        } catch {
-                            message = error.localizedDescription
+                if let pack = model.sslPack {
+                    HStack {
+                        Text("Certificate")
+                        Spacer()
+                        Text(pack.rootName).font(Theme.mono(.caption)).foregroundStyle(.secondary)
+                    }
+                    HStack {
+                        Text("Valid until")
+                        Spacer()
+                        Text(pack.expiresAt.formatted(date: .abbreviated, time: .omitted))
+                            .font(Theme.mono(.caption)).foregroundStyle(.secondary)
+                    }
+                }
+            } footer: {
+                Text("iOS only installs apps from HTTPS addresses it trusts. XSign makes its own certificate on this iPhone for the local addresses localhost and local.backloop.dev, and iOS needs to be told once to trust it.")
+            }
+
+            if model.installTrusted != true {
+                Section {
+                    step(1, "Tap Download Profile below, then Allow.")
+                    step(2, "Open the Settings app › General › VPN & Device Management › \(model.sslPack?.rootName ?? "XSign Local Install") › Install.")
+                    step(3, "Settings › General › About › Certificate Trust Settings › turn on \(model.sslPack?.rootName ?? "XSign Local Install").")
+                    step(4, "Come back to XSign. Status shows Trusted.")
+                    Button {
+                        Task {
+                            busy = true
+                            defer { busy = false }
+                            do { safari = SafariLink(url: try await model.startTrustProfileServer()) } catch { message = error.localizedDescription }
+                        }
+                    } label: {
+                        HStack {
+                            Label("Download Profile", systemImage: "arrow.down.doc")
+                            Spacer()
+                            if busy { ProgressView() }
                         }
                     }
-                } label: {
-                    HStack {
-                        Text(model.sslPack == nil ? "Download Certificate" : "Refresh Certificate")
-                        Spacer()
-                        if busy { ProgressView() }
-                    }
+                } header: {
+                    SectionLabel("Trust the certificate once")
                 }
+            }
+
+            Section {
+                Button("Check Again") { Task { await model.refreshInstallTrust() } }
+                Button("Make New Certificate", role: .destructive) { confirmNew = true }
                 if let message { Text(message).font(Theme.mono(.caption)).foregroundStyle(.secondary) }
             } footer: {
-                Text("iOS only installs from HTTPS. XSign serves the signed app from 127.0.0.1 with a public certificate for a loopback hostname (backloop.dev), then hands over to the iOS installer. Refresh it if installs start failing.")
+                Text("A new certificate has to be trusted again. Remove the old profile in VPN & Device Management afterwards.")
             }
             Section {
                 Button("Clear Temporary Files") { AppPaths.clearWork() }
@@ -269,7 +298,56 @@ struct InstallerSettingsView: View {
         .font(Theme.mono(.body))
         .screen()
         .navigationTitle("Installer")
+        .task {
+            if model.sslPack == nil { _ = try? await model.ensureSSLPack() }
+            await model.refreshInstallTrust()
+        }
+        .sheet(item: $safari) { link in
+            SafariView(url: link.url).ignoresSafeArea()
+        }
+        .confirmationDialog("Make a new install certificate?", isPresented: $confirmNew, titleVisibility: .visible) {
+            Button("Make New Certificate", role: .destructive) {
+                Task {
+                    do {
+                        let pack = try await model.newSSLPack()
+                        message = "Made \(pack.rootName). Trust it with the steps above."
+                    } catch {
+                        message = error.localizedDescription
+                    }
+                }
+            }
+        }
     }
+
+    private var statusText: String {
+        switch model.installTrusted {
+        case .some(true): return "Trusted"
+        case .some(false): return "Not trusted yet"
+        case .none: return "Checking…"
+        }
+    }
+
+    private var statusTint: Color { model.installTrusted == true ? .green : .orange }
+
+    private func step(_ number: Int, _ text: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Text("\(number)").font(Theme.mono(.caption, weight: .bold)).foregroundStyle(Theme.accent)
+            Text(text).font(Theme.mono(.caption))
+        }
+    }
+}
+
+struct SafariLink: Identifiable {
+    let url: URL
+    var id: String { url.absoluteString }
+}
+
+/// Safari inside XSign: it can hand a configuration profile to iOS, and XSign
+/// stays open meanwhile so its local server keeps answering.
+struct SafariView: UIViewControllerRepresentable {
+    let url: URL
+    func makeUIViewController(context: Context) -> SFSafariViewController { SFSafariViewController(url: url) }
+    func updateUIViewController(_ controller: SFSafariViewController, context: Context) {}
 }
 
 // MARK: - Homelab

@@ -20,6 +20,7 @@ struct XSignApp: App {
             switch phase {
             case .active:
                 Task { await model.refreshAll() }
+                Task { await model.refreshInstallTrust() }
             case .background:
                 UpdateScheduler.schedule()
             default:

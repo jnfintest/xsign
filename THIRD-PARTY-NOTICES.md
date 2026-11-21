@@ -14,6 +14,7 @@ under the MIT or Apache 2.0 licenses; their notices are in their repositories.
 | [Vapor](https://github.com/vapor/vapor) | Local install server | MIT |
 | [ZIPFoundation](https://github.com/weichsel/ZIPFoundation) | Unpacking and repacking `.ipa` files | MIT |
 | [SwiftNIO SSL](https://github.com/apple/swift-nio-ssl) | HTTPS for the install server | Apache 2.0 |
+| [swift-certificates](https://github.com/apple/swift-certificates) | Making the local install certificate | Apache 2.0 |
 
 ## zsign and Zsign-Package
 
@@ -95,7 +96,9 @@ SOFTWARE.
 
 ```
 
-## SwiftNIO SSL
+## SwiftNIO SSL and swift-certificates
+
+Both are released by Apple under the Apache License 2.0 below.
 
 ```
 

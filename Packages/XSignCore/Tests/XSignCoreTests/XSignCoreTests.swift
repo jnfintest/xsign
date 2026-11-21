@@ -250,3 +250,34 @@ final class InstallManifestTests: XCTestCase {
         XCTAssertTrue(url?.absoluteString.hasPrefix("itms-services://?action=download-manifest&url=https") ?? false)
     }
 }
+
+final class TrustProfileTests: XCTestCase {
+    func testMobileconfigCarriesTheRootCertificate() throws {
+        let der = Data([0x30, 0x82, 0x01, 0x0a])
+        let data = try TrustProfile.mobileconfig(rootDER: der, name: "XSign Local Install AB12", identifier: "app.xsign.install")
+        let plist = try XCTUnwrap(PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
+        XCTAssertEqual(plist["PayloadType"] as? String, "Configuration")
+        XCTAssertEqual(plist["PayloadIdentifier"] as? String, "app.xsign.install")
+        let payload = try XCTUnwrap((plist["PayloadContent"] as? [[String: Any]])?.first)
+        XCTAssertEqual(payload["PayloadType"] as? String, "com.apple.security.root")
+        XCTAssertEqual(payload["PayloadContent"] as? Data, der)
+        XCTAssertNotEqual(payload["PayloadUUID"] as? String, plist["PayloadUUID"] as? String)
+    }
+
+    func testDERCertificatesFromPEM() {
+        let pem = """
+        -----BEGIN CERTIFICATE-----
+        AQID
+        BA==
+        -----END CERTIFICATE-----
+        -----BEGIN PRIVATE KEY-----
+        BQY=
+        -----END PRIVATE KEY-----
+        -----BEGIN CERTIFICATE-----
+        CQk=
+        -----END CERTIFICATE-----
+        """
+        XCTAssertEqual(TrustProfile.derCertificates(fromPEM: pem), [Data([1, 2, 3, 4]), Data([9, 9])])
+        XCTAssertEqual(TrustProfile.derCertificates(fromPEM: "nothing"), [])
+    }
+}
