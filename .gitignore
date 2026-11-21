@@ -1,0 +1,21 @@
+# Xcode / XcodeGen output
+*.xcodeproj
+*.xcworkspace
+!Packages/**/*.xcworkspace
+xcuserdata/
+DerivedData/
+build/
+.build/
+.swiftpm/
+Package.resolved
+
+# Artifacts
+*.ipa
+Payload/
+*.p12
+*.mobileprovision
+*.pem
+*.crt
+
+.DS_Store
+XSign/Info.plist

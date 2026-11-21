@@ -1,0 +1,104 @@
+name: Build
+
+# Builds only when there is something to install: pushes to main, version tags,
+# and manual runs (Actions › Build › Run workflow, on any branch). Pushes to
+# other branches and pull requests don't build.
+#
+# GitHub bills each macOS job in whole minutes at ten times the Linux rate, so
+# the tests and the .ipa build share one job instead of paying for two.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ipa:
+    name: Test and build unsigned IPA
+    runs-on: macos-15
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run XSignCore unit tests
+        run: swift test --package-path Packages/XSignCore
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate project
+        run: xcodegen generate
+
+      # Keep downloaded Swift packages (Vapor, NIO, Zsign...) between runs so
+      # they aren't fetched again every build.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/org.swift.swiftpm
+            build/SourcePackages
+          key: swiftpm-v1-${{ hashFiles('project.yml') }}
+          restore-keys: swiftpm-v1-
+
+      - name: Build
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project XSign.xcodeproj \
+            -scheme XSign \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            -skipPackagePluginValidation \
+            -skipMacroValidation \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build | tee xcodebuild.log | grep -E "error:|warning: unable|BUILD (SUCCEEDED|FAILED)" || true
+          test -d build/Build/Products/Release-iphoneos/XSign.app
+
+      - name: Upload build log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-log
+          path: xcodebuild.log
+
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/XSign.app Payload/
+          zip -qry XSign-unsigned.ipa Payload
+          ls -lh XSign-unsigned.ipa
+
+      # A push to main (or a v* tag) publishes the .ipa on Releases as
+      # v<MARKETING_VERSION>, so the phone can download it directly.
+      - name: Publish on Releases
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(grep -E '^\s*MARKETING_VERSION:' project.yml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          shasum -a 256 XSign-unsigned.ipa | tee SHA256.txt
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            gh release upload "v${VERSION}" XSign-unsigned.ipa SHA256.txt --clobber
+          else
+            gh release create "v${VERSION}" XSign-unsigned.ipa SHA256.txt --target "$GITHUB_SHA" \
+              --title "XSign ${VERSION}" \
+              --notes "Unsigned build of XSign ${VERSION}. Sign it once with your own signer, then XSign can keep itself and your other apps updated."
+          fi
+
+      # Releases already has the .ipa for main and tags; manual runs on other
+      # branches keep it here instead.
+      - uses: actions/upload-artifact@v4
+        if: github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/v')
+        with:
+          name: XSign-unsigned
+          path: XSign-unsigned.ipa
+          retention-days: 14

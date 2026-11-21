@@ -1,0 +1,56 @@
+# Template for a native Xcode app repo, as .github/workflows/release.yml.
+#
+# Push a tag like v1.4.0 and this builds an *unsigned* IPA and attaches it to
+# a GitHub Release. XSign sees the new release, downloads the IPA, signs it on
+# your iPhone with your certificate and installs it.
+#
+# Adjust SCHEME / PROJECT (or use -workspace) to match your Xcode
+# project. Not a native Xcode app (Expo / Flutter / …)? Replace the Build step
+# with that toolchain's "build iOS without signing" command and keep the
+# Package + Release steps.
+name: Release IPA
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  SCHEME: MyApp
+  PROJECT: MyApp.xcodeproj
+
+jobs:
+  release:
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build (unsigned)
+        run: |
+          set -o pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          xcodebuild \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            MARKETING_VERSION="$VERSION" \
+            CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package IPA
+        run: |
+          APP=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" | head -n1)
+          mkdir -p Payload && cp -R "$APP" Payload/
+          zip -qry MyApp.ipa Payload
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: MyApp.ipa
+          generate_release_notes: true
