@@ -9,7 +9,6 @@ enum SigningError: LocalizedError {
     case wrongPassword
     case certificateExpired
     case signFailed
-    case profileMismatch(profile: String, bundleID: String)
 
     var errorDescription: String? {
         switch self {
@@ -18,8 +17,6 @@ enum SigningError: LocalizedError {
         case .wrongPassword: return "The .p12 password is incorrect."
         case .certificateExpired: return "The signing certificate / profile has expired."
         case .signFailed: return "Signing failed. Check that the profile matches the certificate."
-        case let .profileMismatch(profile, bundleID):
-            return "The provisioning profile (\(profile)) can't sign \(bundleID). XSign won't change the bundle ID, because iOS would install a second, empty copy of the app. Import a profile that covers \(bundleID)."
         }
     }
 }
@@ -46,22 +43,17 @@ enum Signer {
 
     /// Signs the unpacked app in place. Returns the bundle identifier used.
     ///
-    /// - Parameter lockBundleIdentifier: keep the bundle ID exactly (managed
-    ///   apps, whose on-device data is tied to it). When false (library
-    ///   imports) the ID is adapted to fit the provisioning profile.
+    /// The app keeps its own bundle ID unless an override is given, as Feather
+    /// and FlareStore do: iOS ties an app's data to that ID. The profile's App
+    /// ID doesn't have to match it; the signature carries the profile's
+    /// entitlements, and certificates sold for sideloading usually have one
+    /// fixed App ID that is used to sign every app.
     @discardableResult
     static func sign(_ package: inout IPAPackage, with credentials: Credentials,
-                     bundleIdentifierOverride: String?, lockBundleIdentifier: Bool) throws -> String {
+                     bundleIdentifierOverride: String?) throws -> String {
         let original = package.bundleIdentifier
-        var target = bundleIdentifierOverride?.trimmingCharacters(in: .whitespaces) ?? ""
-        if target.isEmpty {
-            target = lockBundleIdentifier
-                ? original
-                : (credentials.parsedProfile?.signingBundleIdentifier(for: original) ?? original)
-        }
-        if let profile = credentials.parsedProfile, !profile.allows(bundleIdentifier: target) {
-            throw SigningError.profileMismatch(profile: profile.bundleIdentifierPattern ?? profile.name, bundleID: target)
-        }
+        let custom = bundleIdentifierOverride?.trimmingCharacters(in: .whitespaces) ?? ""
+        let target = custom.isEmpty ? original : custom
 
         var succeeded = false
         let started = Zsign.sign(

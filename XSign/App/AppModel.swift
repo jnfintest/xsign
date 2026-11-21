@@ -447,8 +447,6 @@ final class AppModel: ObservableObject {
         defer { try? FileManager.default.removeItem(at: work) }
         let original = item.originalURL
         let signedURL = item.signedURL
-        // Apps from a source keep their bundle ID: iOS ties their data to it.
-        let lock = item.catalogKey != nil
         let unpacked = try await Task.detached(priority: .userInitiated) {
             try IPAPackage.extract(ipa: original, into: work.appendingPathComponent("unpacked", isDirectory: true))
         }.value
@@ -457,8 +455,8 @@ final class AppModel: ObservableObject {
         phases[key] = .signing
         let bundleID = try await Task.detached(priority: .userInitiated) { () -> String in
             var package = unpacked
-            let bundleID = try Signer.sign(&package, with: credentials, bundleIdentifierOverride: nil,
-                                           lockBundleIdentifier: lock)
+            // Every app keeps its own bundle ID: iOS ties its data to it.
+            let bundleID = try Signer.sign(&package, with: credentials, bundleIdentifierOverride: nil)
             try package.repackage(to: signedURL)
             return bundleID
         }.value

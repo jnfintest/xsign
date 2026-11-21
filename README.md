@@ -31,8 +31,9 @@ XSign ── download ─► unzip ─► zsign (your .p12 + profile) ─► zip
   **Share** (exports the signed `.ipa`). You can also import any `.ipa` from
   Files.
 - **On-device signing** with [zsign](https://github.com/zhlynn/zsign) (MIT).
-  Apps from a source always keep their bundle ID. If the profile can't sign
-  that ID, XSign stops instead of installing a second, empty copy of the app.
+  Every app keeps its own bundle ID, as in Feather, so an update installs over
+  the existing app and its data. This works with profiles that have one fixed
+  App ID, as most sideloading certificates do.
   Downloads are checked against GitHub's SHA-256 digest when one is available.
 - **Local install**: a loopback-only HTTPS server (Vapor) serves the manifest
   and IPA, then iOS's own installer takes over.

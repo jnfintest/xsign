@@ -306,7 +306,8 @@ struct PhaseText: View {
         Text(phase.label)
             .font(Theme.mono(.caption))
             .foregroundStyle(phase.isBusy ? Theme.accent : (phase == .finished ? Color.green : Color.red))
-            .lineLimit(3)
+            .lineLimit(phase.isBusy || phase == .finished ? 3 : nil)
+            .fixedSize(horizontal: false, vertical: true)
             .onTapGesture(perform: onDismiss)
     }
 }
