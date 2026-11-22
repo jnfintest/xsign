@@ -26,8 +26,11 @@ struct SSLPack: Codable {
     var expiresAt: Date
 
     /// Names the server certificate covers, tried in this order. Every
-    /// subdomain of backloop.dev still resolves to 127.0.0.1.
-    static let hostnames = ["localhost", "local.backloop.dev"]
+    /// subdomain of backloop.dev still resolves to 127.0.0.1, and iOS's
+    /// installer reaches it there; with "localhost" it can't connect (likely
+    /// because it tries ::1 while the server listens on 127.0.0.1), so that
+    /// name is only the fallback.
+    static let hostnames = ["local.backloop.dev", "localhost"]
     static let profileIdentifier = "app.xsign.local-install"
 
     private static var fileURL: URL { AppPaths.ssl.appendingPathComponent("local-install.json") }
