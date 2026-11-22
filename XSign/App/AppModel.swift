@@ -67,7 +67,7 @@ enum InstallError: LocalizedError {
 }
 
 /// An app offered by one of the sources, with the source it came from.
-struct CatalogEntry: Identifiable, Hashable {
+struct CatalogEntry: Identifiable, Hashable, Sendable {
     let source: SourceRecord
     let app: CatalogApp
 
@@ -105,6 +105,10 @@ final class AppModel: ObservableObject {
 
     @Published var sources: [SourceRecord] = []
     @Published private(set) var catalogs: [UUID: SourceCatalog] = [:]
+    /// Search / lookup tables over `catalogs`, rebuilt off the main thread.
+    @Published private(set) var index = CatalogIndex()
+    /// False until the cached catalogs have been read at launch.
+    @Published private(set) var catalogsLoaded = false
     @Published var library: [LibraryItem] = []
     @Published var certificates: [CertificateRecord] = []
     @Published var activeCertificateID: UUID?
@@ -126,6 +130,8 @@ final class AppModel: ObservableObject {
     /// stale timeout can't cancel a newer attempt.
     private var installWaiters: [String: (token: UUID, continuation: CheckedContinuation<Void, Error>)] = [:]
     private var isLoading = true
+    private var catalogLoad: Task<Void, Never>?
+    private var indexTask: Task<Void, Never>?
 
     init() {
         let state = StateStore.load()
@@ -135,10 +141,22 @@ final class AppModel: ObservableObject {
         activeCertificateID = state.activeCertificateID
         settings = state.settings
         rateLimit = state.rateLimit
-        catalogs = StateStore.loadCatalogs()
         sslPack = SSLPack.load()
         AppPaths.clearWork()
         isLoading = false
+        // A big source's cache takes a moment to read: never on the main thread.
+        let sourceIDs = sources.map(\.id)
+        catalogLoad = Task { [weak self] in
+            let cached = await Task.detached(priority: .userInitiated) {
+                StateStore.loadCatalogs(for: sourceIDs)
+            }.value
+            guard let self else { return }
+            for (id, catalog) in cached where self.catalogs[id] == nil && self.sources.contains(where: { $0.id == id }) {
+                self.catalogs[id] = catalog
+            }
+            await self.rebuildIndex()
+            self.catalogsLoaded = true
+        }
     }
 
     func persist() {
@@ -158,25 +176,43 @@ final class AppModel: ObservableObject {
 
     var isRefreshing: Bool { !refreshingSources.isEmpty }
 
-    /// Every app from every source, sorted by name.
-    var allEntries: [CatalogEntry] {
-        sources.flatMap { source in
-            (catalogs[source.id]?.apps ?? []).map { CatalogEntry(source: source, app: $0) }
-        }
-        .sorted { $0.app.name.localizedCaseInsensitiveCompare($1.app.name) == .orderedAscending }
-    }
-
-    func entries(in sourceID: UUID) -> [CatalogEntry] {
-        guard let source = sources.first(where: { $0.id == sourceID }) else { return [] }
-        return (catalogs[sourceID]?.apps ?? []).map { CatalogEntry(source: source, app: $0) }
-    }
+    /// Number of apps a source offers.
+    func appCount(in sourceID: UUID) -> Int { catalogs[sourceID]?.apps.count ?? 0 }
 
     func entry(forKey key: String) -> CatalogEntry? {
-        let parts = key.split(separator: "|", maxSplits: 1).map(String.init)
-        guard parts.count == 2, let sourceID = UUID(uuidString: parts[0]),
-              let source = sources.first(where: { $0.id == sourceID }),
-              let app = catalogs[sourceID]?.apps.first(where: { $0.id == parts[1] }) else { return nil }
+        index.entry(forKey: key)
+    }
+
+    /// Looks an app up in the raw catalog, for the moment between adding a
+    /// source and its index being ready.
+    private func catalogEntry(sourceID: UUID, appID: String) -> CatalogEntry? {
+        guard let source = sources.first(where: { $0.id == sourceID }),
+              let app = catalogs[sourceID]?.apps.first(where: { $0.id == appID }) else { return nil }
         return CatalogEntry(source: source, app: app)
+    }
+
+    /// Rebuilds the index from the current sources and catalogs. Rebuilds run
+    /// one after another, so once this returns the index reflects at least
+    /// the state at the time of the call.
+    func rebuildIndex() async {
+        let previous = indexTask
+        let task = Task { [weak self] in
+            await previous?.value
+            guard let self else { return }
+            let sources = self.sources
+            let catalogs = self.catalogs
+            let built = await Task.detached(priority: .userInitiated) {
+                CatalogIndex(sources: sources, catalogs: catalogs)
+            }.value
+            self.index = built
+        }
+        indexTask = task
+        await task.value
+    }
+
+    private func store(_ catalog: SourceCatalog?, for sourceID: UUID) {
+        catalogs[sourceID] = catalog
+        StateStore.saveCatalog(catalog, for: sourceID)
     }
 
     func libraryItem(for entry: CatalogEntry) -> LibraryItem? {
@@ -197,7 +233,9 @@ final class AppModel: ObservableObject {
     }
 
     func hasUpdate(_ entry: CatalogEntry) -> Bool {
-        pendingUpdates.contains { $0.entry.key == entry.key }
+        guard let item = libraryItem(for: entry), item.installed != nil,
+              let release = entry.app.latest(includeBetas: settings.includeBetaUpdates) else { return false }
+        return release.isUpdate(over: item.installed)
     }
 
     func phase(for key: String) -> JobPhase? { phases[key] }
@@ -225,30 +263,33 @@ final class AppModel: ObservableObject {
         if let existing = sources.first(where: { $0.kind == kind }) { return existing.id }
         var record = SourceRecord(kind: kind, name: catalog?.name ?? kind.address, iconURL: catalog?.iconURL)
         if let catalog {
-            catalogs[record.id] = catalog
+            store(catalog, for: record.id)
             record.lastRefreshed = Date()
-            StateStore.saveCatalogs(catalogs)
         }
         sources.append(record)
         persist()
-        if catalog == nil { Task { await refresh(record.id) } }
+        if catalog == nil {
+            Task { await refresh(record.id) }
+        } else {
+            Task { await rebuildIndex() }
+        }
         return record.id
     }
 
     /// Paste-and-go: add the source if needed, then get one of its apps.
     func addSourceAndGet(_ kind: SourceKind, catalog: SourceCatalog, appID: String) -> String? {
         let sourceID = addSource(kind, catalog: catalog)
-        guard let entry = entries(in: sourceID).first(where: { $0.app.id == appID }) else { return nil }
+        guard let entry = catalogEntry(sourceID: sourceID, appID: appID) else { return nil }
         get(entry)
         return entry.key
     }
 
     func removeSource(_ id: UUID) {
         sources.removeAll { $0.id == id }
-        catalogs[id] = nil
-        StateStore.saveCatalogs(catalogs)
+        store(nil, for: id)
         // Apps already in the library stay; they just stop getting updates.
         persist()
+        Task { await rebuildIndex() }
     }
 
     func moveSources(from offsets: IndexSet, to destination: Int) {
@@ -256,20 +297,25 @@ final class AppModel: ObservableObject {
         persist()
     }
 
-    func refresh(_ id: UUID) async {
+    /// Fetches one source again. `reindex: false` leaves rebuilding the index
+    /// to the caller (refreshAll does it once for every source).
+    func refresh(_ id: UUID, reindex: Bool = true) async {
+        await catalogLoad?.value
         guard let source = sources.first(where: { $0.id == id }), !refreshingSources.contains(id) else { return }
         refreshingSources.insert(id)
         defer { refreshingSources.remove(id) }
         do {
             let catalog = try await fetchCatalog(source.kind)
-            catalogs[id] = catalog
-            StateStore.saveCatalogs(catalogs)
+            // Removed while it was loading.
+            guard sources.contains(where: { $0.id == id }) else { return }
+            store(catalog, for: id)
             update(source: id) {
                 $0.name = catalog.name
                 $0.iconURL = catalog.iconURL ?? $0.iconURL
                 $0.lastError = nil
                 $0.lastRefreshed = Date()
             }
+            if reindex { await rebuildIndex() }
         } catch {
             update(source: id) {
                 $0.lastError = error.localizedDescription
@@ -278,16 +324,25 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Refreshes every source. Returns updates that weren't pending before
+    /// Refreshes every source, or with `staleAfter` only those not refreshed
+    /// for that long (so coming back to the app doesn't download a huge
+    /// source again every time). Returns updates that weren't pending before
     /// (used for notifications).
     @discardableResult
-    func refreshAll() async -> [PendingUpdate] {
+    func refreshAll(staleAfter: TimeInterval? = nil) async -> [PendingUpdate] {
+        await catalogLoad?.value
         let before = Set(pendingUpdates.map { "\($0.item.id)|\($0.release.id)" })
+        let due = sources.filter { source in
+            guard let staleAfter, let last = source.lastRefreshed else { return true }
+            return Date().timeIntervalSince(last) >= staleAfter
+        }
+        guard !due.isEmpty else { return [] }
         await withTaskGroup(of: Void.self) { group in
-            for source in sources {
-                group.addTask { await self.refresh(source.id) }
+            for source in due {
+                group.addTask { await self.refresh(source.id, reindex: false) }
             }
         }
+        await rebuildIndex()
         return pendingUpdates.filter { !before.contains("\($0.item.id)|\($0.release.id)") }
     }
 

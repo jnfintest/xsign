@@ -21,11 +21,15 @@ XSign ── download ─► unzip ─► zsign (your .p12 + profile) ─► zip
   `.ipa`. It can also be any AltStore / Feather-style source URL, or a
   single-app XSign feed on your NAS. XSign shows a preview before you add one.
   Private repos work with a fine-grained token kept in the keychain.
-- **Apps**: one searchable catalog of every app from every source, with
-  Get / Update / Reinstall buttons and live progress. Each app has a page with
-  What's New, every version, and info. Pre-releases are listed as **beta**.
-- **Home**: pending updates with **Update All**, setup steps, certificate
-  status, and the newest builds across your sources.
+- **Apps**: browse what your sources offer, Feather-style. Each source shows
+  its newest few apps with **See All**; search covers every source and loads
+  results a page at a time, so sources with tens of thousands of apps stay
+  smooth. Get / Update / Reinstall buttons with live progress. Each app has a
+  page with What's New, recent versions, and info. Pre-releases are listed as
+  **beta**.
+- **Home**: what you have. Pending updates with **Update All**, setup steps,
+  certificate status, and **Your apps** with their installed version and
+  whether each is up to date. Source catalogs are not listed here.
 - **Library**: signed apps with **Install** (reuses the signed copy),
   **Re-sign** (signs the original again with the current certificate) and
   **Share** (exports the signed `.ipa`). You can also import any `.ipa` from

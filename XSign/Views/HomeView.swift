@@ -1,16 +1,21 @@
 import SwiftUI
 import XSignCore
 
-/// Overview: what needs updating, signing status, what's new in sources.
+/// Overview of what you have: signing status, pending updates and your own
+/// apps. Browsing what sources offer happens on the Apps and Repos tabs, so
+/// a source with thousands of apps doesn't flood this screen.
 struct HomeView: View {
     @EnvironmentObject private var model: AppModel
 
-    private var recent: [CatalogEntry] {
-        model.allEntries
-            .filter { $0.app.versions.first?.publishedAt != nil }
-            .sorted { ($0.app.versions.first?.publishedAt ?? .distantPast) > ($1.app.versions.first?.publishedAt ?? .distantPast) }
-            .prefix(5)
-            .map { $0 }
+    private static let yourAppsLimit = 8
+
+    /// Apps you have through XSign, most recently installed first.
+    private var yourApps: [LibraryItem] {
+        model.library.sorted { Self.lastUsed($0) > Self.lastUsed($1) }
+    }
+
+    private static func lastUsed(_ item: LibraryItem) -> Date {
+        item.installed?.installedAt ?? item.signedAt ?? item.addedAt
     }
 
     var body: some View {
@@ -33,14 +38,7 @@ struct HomeView: View {
                     setupCard
                     updatesSection
                     stats
-                    if !recent.isEmpty {
-                        SectionLabel("Latest from your sources")
-                        VStack(spacing: 10) {
-                            ForEach(recent) { entry in
-                                NavigationLink(value: entry) { CatalogRow(entry: entry) }.buttonStyle(.plain)
-                            }
-                        }
-                    }
+                    yourAppsSection
                 }
                 .padding(.horizontal, 16)
             }
@@ -133,8 +131,39 @@ struct HomeView: View {
     private var stats: some View {
         HStack(spacing: 10) {
             stat("\(model.sources.count)", "sources") { model.selectedTab = .repos }
-            stat("\(model.allEntries.count)", "apps") { model.selectedTab = .apps }
+            stat("\(model.library.filter { $0.installed != nil }.count)", "installed") { model.selectedTab = .library }
             stat("\(model.library.filter(\.hasSignedCopy).count)", "signed") { model.selectedTab = .library }
+        }
+    }
+
+    // MARK: Your apps
+
+    @ViewBuilder
+    private var yourAppsSection: some View {
+        let apps = yourApps
+        SectionLabel("Your apps", trailing: apps.count > Self.yourAppsLimit
+                     ? AnyView(Button("See All") { model.selectedTab = .library }.font(Theme.mono(.caption, weight: .bold)))
+                     : nil)
+        if apps.isEmpty {
+            Card(padding: 14) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Apps you get show up here, so you can see what you have and what needs updating.")
+                        .font(Theme.mono(.subheadline)).foregroundStyle(.secondary)
+                    Button("Browse Apps") { model.selectedTab = .apps }
+                        .font(Theme.mono(.subheadline, weight: .semibold))
+                }
+            }
+        } else {
+            VStack(spacing: 0) {
+                ForEach(apps.prefix(Self.yourAppsLimit)) { item in
+                    YourAppRow(item: item)
+                    if item.id != apps.prefix(Self.yourAppsLimit).last?.id {
+                        Divider().padding(.leading, 70)
+                    }
+                }
+            }
+            .background(Theme.card.opacity(0.92), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 22, style: .continuous).stroke(Theme.stroke))
         }
     }
 
@@ -185,5 +214,60 @@ struct UpdateRow: View {
             }
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// Compact row for one of your apps: what's installed and whether it's current.
+struct YourAppRow: View {
+    @EnvironmentObject private var model: AppModel
+    let item: LibraryItem
+
+    var body: some View {
+        let entry = item.catalogKey.flatMap(model.entry(forKey:))
+        if let entry {
+            NavigationLink(value: entry) { content(entry) }.buttonStyle(.plain)
+        } else {
+            Button { model.selectedTab = .library } label: { content(nil) }.buttonStyle(.plain)
+        }
+    }
+
+    private func content(_ entry: CatalogEntry?) -> some View {
+        let phase = model.phase(for: item.jobKey)
+        return HStack(spacing: 12) {
+            AppIconView(name: item.name, iconFileName: item.iconFileName, iconURL: entry?.app.iconURL,
+                        tintHex: entry?.app.tintHex, size: 44)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.name).font(.subheadline.weight(.semibold)).lineLimit(1)
+                if let phase {
+                    PhaseText(phase: phase) { model.dismissPhase(item.jobKey) }
+                } else {
+                    Text(subtitle(entry)).font(Theme.mono(.caption)).foregroundStyle(.secondary).lineLimit(1)
+                }
+            }
+            Spacer(minLength: 6)
+            status(entry)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .contentShape(Rectangle())
+    }
+
+    private func subtitle(_ entry: CatalogEntry?) -> String {
+        let version = "v\(item.installed?.displayVersion ?? item.displayVersion)"
+        guard let source = entry?.source.name ?? item.sourceName else { return "\(version) · imported" }
+        return "\(version) · \(source)"
+    }
+
+    @ViewBuilder
+    private func status(_ entry: CatalogEntry?) -> some View {
+        if let entry, model.hasUpdate(entry) {
+            Chip(text: "update", tint: Theme.accent)
+        } else if item.installed == nil {
+            Chip(text: "not installed", tint: .secondary)
+        } else if item.catalogKey != nil && entry == nil && model.catalogsLoaded {
+            Chip(text: "no source", tint: .orange)
+        } else {
+            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+        }
     }
 }

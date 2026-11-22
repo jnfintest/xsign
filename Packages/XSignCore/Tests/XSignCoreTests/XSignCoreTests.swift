@@ -165,6 +165,58 @@ final class FeedTests: XCTestCase {
 
     func testInvalidFeed() {
         XCTAssertThrowsError(try FeedClient.parse(Data(#"{"foo":1}"#.utf8)))
+        XCTAssertThrowsError(try FeedClient.parse(Data("[1,2]".utf8)))
+    }
+
+    func testBrokenEntriesAreSkippedNotFatal() throws {
+        let json = """
+        {"name":"Big","apps":[
+          {"name":"Good","bundleIdentifier":"com.good","versions":[
+            {"version":"1.0","buildVersion":7,"size":"2048","downloadURL":"https://x/g.ipa"},
+            {"version":"0.9","downloadURL":42},
+            {"version":"0.8"}
+          ]},
+          "not an app",
+          {"name":["wrong"],"bundleIdentifier":"com.weird","beta":"true","versions":[{"version":"2.0","size":1.5e3,"downloadURL":"https://x/w.ipa"}]}
+        ]}
+        """
+        let catalog = try FeedClient.parse(Data(json.utf8))
+        XCTAssertEqual(catalog.apps.map(\.id), ["com.good", "com.weird"])
+        XCTAssertEqual(catalog.apps[0].versions.count, 1)
+        XCTAssertEqual(catalog.apps[0].versions[0].build, "7")
+        XCTAssertEqual(catalog.apps[0].versions[0].asset.size, 2048)
+        XCTAssertEqual(catalog.apps[1].name, "com.weird")
+        XCTAssertTrue(catalog.apps[1].versions[0].isPrerelease)
+        XCTAssertEqual(catalog.apps[1].versions[0].asset.size, 1500)
+    }
+
+    func testDuplicateBundleIDsGetUniqueIDs() throws {
+        let json = """
+        {"apps":[
+          {"name":"A","bundleIdentifier":"com.dup","versions":[{"version":"1","downloadURL":"https://x/a.ipa"}]},
+          {"name":"B","bundleIdentifier":"com.dup","versions":[{"version":"1","downloadURL":"https://x/b.ipa"}]},
+          {"name":"C","bundleIdentifier":"com.dup","versions":[{"version":"1","downloadURL":"https://x/c.ipa"}]}
+        ]}
+        """
+        let catalog = try FeedClient.parse(Data(json.utf8))
+        XCTAssertEqual(catalog.apps.map(\.id), ["com.dup", "com.dup#2", "com.dup#3"])
+        XCTAssertEqual(catalog.apps.map(\.bundleIdentifier), ["com.dup", "com.dup", "com.dup"])
+    }
+
+    func testKeepsOnlyNewestVersions() throws {
+        let versions = (1...40).map { #"{"version":"1.\#($0)","downloadURL":"https://x/\#($0).ipa"}"# }
+        let json = #"{"apps":[{"name":"Many","bundleIdentifier":"com.many","versions":[\#(versions.joined(separator: ","))]}]}"#
+        let app = try FeedClient.parse(Data(json.utf8)).apps[0]
+        XCTAssertEqual(app.versions.count, FeedClient.maxVersionsPerApp)
+        XCTAssertEqual(app.versions.first?.version, "1.40")
+    }
+
+    func testDateFormats() {
+        XCTAssertNotNil(FeedClient.parseDate("2026-11-19T10:00:00Z"))
+        XCTAssertNotNil(FeedClient.parseDate("2026-11-19T10:00:00.123Z"))
+        XCTAssertNotNil(FeedClient.parseDate("2026-11-19T10:00:00-05:00"))
+        XCTAssertNotNil(FeedClient.parseDate("2026-11-19"))
+        XCTAssertNil(FeedClient.parseDate("yesterday"))
     }
 }
 

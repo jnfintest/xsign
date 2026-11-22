@@ -36,6 +36,7 @@ struct ReposView: View {
             .screen()
             .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(for: UUID.self) { SourceDetailView(sourceID: $0) }
+            .navigationDestination(for: CatalogEntry.self) { CatalogAppDetailView(entryKey: $0.key) }
             .sheet(isPresented: $showingAdd) { AddSourceView(initialInput: addInput) }
             .onChange(of: model.pendingSourceInput) { input in
                 guard let input else { return }
@@ -51,7 +52,7 @@ struct ReposView: View {
             VStack(alignment: .leading, spacing: 12) {
                 Image(systemName: "folder.badge.plus").font(.largeTitle).foregroundStyle(Theme.accent)
                 Text("No sources yet").font(.title3.bold())
-                Text("Add a GitHub repository that publishes an .ipa in its releases, or any AltStore / Feather-style source URL. Every app from every source shows up under Apps.")
+                Text("Add a GitHub repository that publishes an .ipa in its releases, or any AltStore / Feather-style source URL. Browse and search their apps under Apps.")
                     .font(Theme.mono(.subheadline))
                     .foregroundStyle(.secondary)
                 Button { showingAdd = true } label: {
@@ -80,7 +81,7 @@ struct SourceCard: View {
     let source: SourceRecord
 
     var body: some View {
-        let apps = model.entries(in: source.id)
+        let appCount = model.appCount(in: source.id)
         Card {
             HStack(spacing: 14) {
                 AppIconView(name: source.name, iconURL: source.iconURL, size: 52)
@@ -98,8 +99,10 @@ struct SourceCard: View {
                         Text("Refreshing…").font(Theme.mono(.caption)).foregroundStyle(Theme.accent)
                     } else if let error = source.lastError {
                         Text(error).font(Theme.mono(.caption)).foregroundStyle(.orange).lineLimit(2)
+                    } else if !model.catalogsLoaded {
+                        Text("Loading…").font(Theme.mono(.caption)).foregroundStyle(.secondary)
                     } else {
-                        Text("\(apps.count) app\(apps.count == 1 ? "" : "s")\(source.lastRefreshed.map { " · \($0.relative)" } ?? "")")
+                        Text("\(appCount) app\(appCount == 1 ? "" : "s")\(source.lastRefreshed.map { " · \($0.relative)" } ?? "")")
                             .font(Theme.mono(.caption))
                             .foregroundStyle(.secondary)
                     }
@@ -111,23 +114,29 @@ struct SourceCard: View {
     }
 }
 
-/// Apps offered by one source.
+/// Apps offered by one source, searchable and loaded a page at a time.
 struct SourceDetailView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
     let sourceID: UUID
     @State private var confirmRemove = false
+    @State private var search = ""
 
     var body: some View {
         ScrollView {
             if let source = model.sources.first(where: { $0.id == sourceID }) {
-                VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 14) {
                     HStack(spacing: 14) {
                         AppIconView(name: source.name, iconURL: source.iconURL, size: 64)
                         VStack(alignment: .leading, spacing: 4) {
                             Text(source.name).font(.title2.bold())
                             Text(source.kind.address).font(Theme.mono(.caption)).foregroundStyle(.secondary)
                                 .textSelection(.enabled)
+                            if model.refreshingSources.contains(sourceID) {
+                                Text("Refreshing…").font(Theme.mono(.caption)).foregroundStyle(Theme.accent)
+                            } else if let refreshed = source.lastRefreshed {
+                                Text("Updated \(refreshed.relative)").font(Theme.mono(.caption)).foregroundStyle(.secondary)
+                            }
                         }
                     }
                     if let error = source.lastError {
@@ -139,33 +148,37 @@ struct SourceDetailView: View {
                                 .font(Theme.mono(.footnote)).foregroundStyle(.secondary)
                         }
                     }
-                    SectionLabel("Apps")
-                    let entries = model.entries(in: sourceID)
-                    if entries.isEmpty {
-                        Card {
-                            Text(model.refreshingSources.contains(sourceID) ? "Loading…" : "No installable apps found yet.")
-                                .font(Theme.mono(.subheadline)).foregroundStyle(.secondary)
-                        }
+                    if model.appCount(in: sourceID) > 1 {
+                        SearchField(prompt: "Search \(source.name)", text: $search)
+                    }
+                    if model.catalogsLoaded {
+                        CatalogResultsList(query: search.trimmingCharacters(in: .whitespaces), sourceID: sourceID)
                     } else {
-                        VStack(spacing: 10) {
-                            ForEach(entries) { entry in
-                                NavigationLink(value: entry) { CatalogRow(entry: entry) }.buttonStyle(.plain)
-                            }
-                        }
+                        ProgressView().frame(maxWidth: .infinity).padding(.top, 16)
                     }
-                    Button(role: .destructive) { confirmRemove = true } label: {
-                        Label("Remove Source", systemImage: "trash").frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.large)
                 }
                 .padding(16)
             }
         }
+        .scrollDismissesKeyboard(.interactively)
         .refreshable { await model.refresh(sourceID) }
         .screen()
         .navigationBarTitleDisplayMode(.inline)
-        .navigationDestination(for: CatalogEntry.self) { CatalogAppDetailView(entryKey: $0.key) }
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Menu {
+                    Button { Task { await model.refresh(sourceID) } } label: { Label("Refresh", systemImage: "arrow.clockwise") }
+                    if let source = model.sources.first(where: { $0.id == sourceID }) {
+                        Button { UIPasteboard.general.string = source.kind.address } label: {
+                            Label("Copy Address", systemImage: "doc.on.doc")
+                        }
+                    }
+                    Button(role: .destructive) { confirmRemove = true } label: { Label("Remove Source", systemImage: "trash") }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+            }
+        }
         .confirmationDialog("Remove this source?", isPresented: $confirmRemove, titleVisibility: .visible) {
             Button("Remove", role: .destructive) {
                 model.removeSource(sourceID)
@@ -190,6 +203,8 @@ struct AddSourceView: View {
     @State private var useFeedToken = false
     /// Catalog keys of apps started from this sheet, to show their progress.
     @State private var startedKeys: [String: String] = [:]
+
+    private static let previewLimit = 10
 
     init(initialInput: String = "") {
         _input = State(initialValue: initialInput)
@@ -270,8 +285,12 @@ struct AddSourceView: View {
                                             .font(Theme.mono(.caption)).foregroundStyle(.secondary)
                                     }
                                 }
-                                ForEach(preview.apps.prefix(20)) { app in
+                                ForEach(preview.apps.prefix(Self.previewLimit)) { app in
                                     previewRow(app)
+                                }
+                                if preview.apps.count > Self.previewLimit {
+                                    Text("+ \(preview.apps.count - Self.previewLimit) more. Add the source to browse and search them all.")
+                                        .font(Theme.mono(.caption)).foregroundStyle(.secondary)
                                 }
                                 Text("Get adds this source and installs the app straight away. Add only adds the source.")
                                     .font(Theme.mono(.caption2)).foregroundStyle(.secondary)

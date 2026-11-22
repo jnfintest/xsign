@@ -19,7 +19,7 @@ struct XSignApp: App {
         .onChange(of: scenePhase) { phase in
             switch phase {
             case .active:
-                Task { await model.refreshAll() }
+                Task { await model.refreshAll(staleAfter: 10 * 60) }
                 Task { await model.refreshInstallTrust() }
             case .background:
                 UpdateScheduler.schedule()

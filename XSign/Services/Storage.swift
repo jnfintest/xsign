@@ -10,7 +10,12 @@ enum AppPaths {
     }()
 
     static var stateFile: URL { root.appendingPathComponent("state.json") }
-    static var catalogFile: URL { root.appendingPathComponent("catalogs.json") }
+    /// Pre-0.3 cache holding every source's catalog in one file.
+    static var legacyCatalogFile: URL { root.appendingPathComponent("catalogs.json") }
+    static var catalogs: URL { directory("Catalogs") }
+    static func catalogFile(for sourceID: UUID) -> URL {
+        catalogs.appendingPathComponent("\(sourceID.uuidString).json")
+    }
     static var certificates: URL { directory("Certificates") }
     static var library: URL { directory("Library") }
     static var icons: URL { directory("Icons") }
@@ -165,17 +170,49 @@ enum StateStore {
         write(state, to: AppPaths.stateFile)
     }
 
-    /// Catalogs are a cache: rebuilt from the sources on every refresh.
-    static func loadCatalogs() -> [UUID: SourceCatalog] {
-        guard let data = try? Data(contentsOf: AppPaths.catalogFile),
-              let list = try? decoder.decode([String: SourceCatalog].self, from: data) else { return [:] }
-        var result: [UUID: SourceCatalog] = [:]
-        for (key, value) in list { if let id = UUID(uuidString: key) { result[id] = value } }
-        return result
+    /// Catalogs are a cache, rebuilt from the sources on every refresh. Each
+    /// source has its own file, so refreshing one big source doesn't rewrite
+    /// the others. All catalog file access goes through this queue.
+    private static let catalogQueue = DispatchQueue(label: "com.jnfintest.xsign.catalogs", qos: .utility)
+
+    /// Reads the cached catalogs of these sources. Slow for big sources: call
+    /// it off the main thread.
+    static func loadCatalogs(for sourceIDs: [UUID]) -> [UUID: SourceCatalog] {
+        catalogQueue.sync {
+            Self.migrateLegacyCatalogs()
+            var result: [UUID: SourceCatalog] = [:]
+            for id in sourceIDs {
+                guard let data = try? Data(contentsOf: AppPaths.catalogFile(for: id)),
+                      let catalog = try? Self.decoder.decode(SourceCatalog.self, from: data) else { continue }
+                result[id] = catalog
+            }
+            return result
+        }
     }
 
-    static func saveCatalogs(_ catalogs: [UUID: SourceCatalog]) {
-        write(Dictionary(uniqueKeysWithValues: catalogs.map { ($0.key.uuidString, $0.value) }), to: AppPaths.catalogFile)
+    /// Writes (or, for nil, deletes) one source's catalog in the background.
+    static func saveCatalog(_ catalog: SourceCatalog?, for sourceID: UUID) {
+        let url = AppPaths.catalogFile(for: sourceID)
+        catalogQueue.async {
+            if let catalog {
+                Self.write(catalog, to: url, sortedKeys: false)
+            } else {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
+    }
+
+    private static func migrateLegacyCatalogs() {
+        let legacy = AppPaths.legacyCatalogFile
+        guard FileManager.default.fileExists(atPath: legacy.path) else { return }
+        if let data = try? Data(contentsOf: legacy),
+           let list = try? decoder.decode([String: SourceCatalog].self, from: data) {
+            for (key, catalog) in list {
+                guard let id = UUID(uuidString: key) else { continue }
+                write(catalog, to: AppPaths.catalogFile(for: id), sortedKeys: false)
+            }
+        }
+        try? FileManager.default.removeItem(at: legacy)
     }
 
     private static let decoder: JSONDecoder = {
@@ -184,12 +221,12 @@ enum StateStore {
         return d
     }()
 
-    private static func write<T: Encodable>(_ value: T, to url: URL) {
+    private static func write<T: Encodable>(_ value: T, to url: URL, sortedKeys: Bool = true) {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.sortedKeys]
+        encoder.outputFormatting = sortedKeys ? [.sortedKeys] : []
         guard let data = try? encoder.encode(value) else { return }
-        try? FileManager.default.createDirectory(at: AppPaths.root, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try? data.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
 }

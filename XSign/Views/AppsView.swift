@@ -1,60 +1,24 @@
 import SwiftUI
 import XSignCore
 
-/// Every app from every source.
+/// Browse what your sources offer. Like Feather, it doesn't list every app
+/// at once: each source shows its newest few with See All, and search covers
+/// everything, a page at a time.
 struct AppsView: View {
     @EnvironmentObject private var model: AppModel
     @State private var search = ""
 
-    private var entries: [CatalogEntry] {
-        let all = model.allEntries
-        let query = search.trimmingCharacters(in: .whitespaces)
-        guard !query.isEmpty else { return all }
-        return all.filter {
-            $0.app.name.localizedCaseInsensitiveContains(query)
-                || ($0.app.developer?.localizedCaseInsensitiveContains(query) ?? false)
-                || $0.source.name.localizedCaseInsensitiveContains(query)
-        }
-    }
+    private static let previewCount = 4
+
+    private var query: String { search.trimmingCharacters(in: .whitespaces) }
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     ScreenHeader(title: "Apps")
-                    HStack(spacing: 8) {
-                        Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                        TextField("Search apps", text: $search)
-                            .font(Theme.mono(.body))
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                    }
-                    .padding(12)
-                    .background(Theme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Theme.stroke))
-
-                    if model.sources.isEmpty {
-                        Card {
-                            VStack(alignment: .leading, spacing: 10) {
-                                Text("Nothing here yet").font(.headline)
-                                Text("Apps come from your sources. Add a GitHub repo or a source URL on the Repos tab.")
-                                    .font(Theme.mono(.subheadline)).foregroundStyle(.secondary)
-                                Button("Open Repos") { model.selectedTab = .repos }
-                                    .font(Theme.mono(.subheadline, weight: .semibold))
-                            }
-                        }
-                    } else if entries.isEmpty {
-                        Text(search.isEmpty ? "Your sources don't offer any apps yet." : "No matches.")
-                            .font(Theme.mono(.subheadline)).foregroundStyle(.secondary)
-                            .padding(.top, 8)
-                    } else {
-                        SectionLabel("\(entries.count) app\(entries.count == 1 ? "" : "s")")
-                        VStack(spacing: 10) {
-                            ForEach(entries) { entry in
-                                NavigationLink(value: entry) { CatalogRow(entry: entry) }.buttonStyle(.plain)
-                            }
-                        }
-                    }
+                    SearchField(prompt: "Search \(model.index.count) apps", text: $search)
+                    content
                 }
                 .padding(.horizontal, 16)
             }
@@ -63,6 +27,163 @@ struct AppsView: View {
             .screen()
             .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(for: CatalogEntry.self) { CatalogAppDetailView(entryKey: $0.key) }
+            .navigationDestination(for: UUID.self) { SourceDetailView(sourceID: $0) }
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if model.sources.isEmpty {
+            Card {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Nothing here yet").font(.headline)
+                    Text("Apps come from your sources. Add a GitHub repo or a source URL on the Repos tab.")
+                        .font(Theme.mono(.subheadline)).foregroundStyle(.secondary)
+                    Button("Open Repos") { model.selectedTab = .repos }
+                        .font(Theme.mono(.subheadline, weight: .semibold))
+                }
+            }
+        } else if !query.isEmpty {
+            CatalogResultsList(query: query, sourceID: nil)
+        } else if !model.catalogsLoaded {
+            ProgressView().frame(maxWidth: .infinity).padding(.top, 24)
+        } else {
+            LazyVStack(alignment: .leading, spacing: 10) {
+                ForEach(model.sources) { source in
+                    sourceSection(source)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func sourceSection(_ source: SourceRecord) -> some View {
+        let count = model.index.count(in: source.id)
+        NavigationLink(value: source.id) {
+            HStack(spacing: 10) {
+                AppIconView(name: source.name, iconURL: source.iconURL, size: 30)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(source.name).font(.headline).lineLimit(1)
+                    Text("\(count) app\(count == 1 ? "" : "s")")
+                        .font(Theme.mono(.caption)).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if count > Self.previewCount {
+                    Text("See All").font(Theme.mono(.caption, weight: .bold)).foregroundStyle(Theme.accent)
+                }
+                Image(systemName: "chevron.right").font(.footnote.weight(.semibold)).foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 4)
+            .padding(.top, 6)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+
+        let newest = model.index.newest(in: source.id, limit: Self.previewCount)
+        if newest.isEmpty {
+            Text(model.refreshingSources.contains(source.id) ? "Loading…" : (source.lastError ?? "No installable apps."))
+                .font(Theme.mono(.caption)).foregroundStyle(.secondary).padding(.horizontal, 4)
+        } else {
+            ForEach(newest) { entry in
+                NavigationLink(value: entry) { CatalogRow(entry: entry) }.buttonStyle(.plain)
+            }
+        }
+    }
+}
+
+/// Search box used on the Apps tab and source pages.
+struct SearchField: View {
+    let prompt: String
+    @Binding var text: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+            TextField(prompt, text: $text)
+                .font(Theme.mono(.body))
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .submitLabel(.search)
+            if !text.isEmpty {
+                Button { text = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Clear")
+            }
+        }
+        .padding(12)
+        .background(Theme.card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Theme.stroke))
+    }
+}
+
+/// Apps matching a query (in one source or all), a page at a time. Matching
+/// runs off the main thread, so typing stays smooth with huge sources. Put it
+/// in a lazy stack inside a ScrollView.
+struct CatalogResultsList: View {
+    @EnvironmentObject private var model: AppModel
+    let query: String
+    let sourceID: UUID?
+
+    /// Matches are positions in the index they were computed against, which
+    /// is kept with them: after a refresh the old list stays on screen until
+    /// the new one is ready, instead of collapsing.
+    @State private var results: (index: CatalogIndex, matches: [Int], query: Query)?
+    @State private var limit = Self.pageSize
+
+    static let pageSize = 50
+
+    private struct Query: Hashable, Sendable {
+        let text: String
+        let sourceID: UUID?
+    }
+
+    private struct SearchKey: Hashable {
+        let query: Query
+        let indexID: UUID
+    }
+
+    var body: some View {
+        let current = Query(text: query, sourceID: sourceID)
+        let index = model.index
+        LazyVStack(alignment: .leading, spacing: 10) {
+            if let results {
+                let matches = results.matches
+                if matches.isEmpty {
+                    Text(query.isEmpty ? "No installable apps found yet." : "No matches.")
+                        .font(Theme.mono(.subheadline)).foregroundStyle(.secondary)
+                        .padding(.top, 8)
+                } else {
+                    SectionLabel(query.isEmpty
+                                 ? "\(matches.count) app\(matches.count == 1 ? "" : "s")"
+                                 : "\(matches.count) match\(matches.count == 1 ? "" : "es")")
+                    ForEach(results.index.entries(at: matches.prefix(limit))) { entry in
+                        NavigationLink(value: entry) { CatalogRow(entry: entry) }.buttonStyle(.plain)
+                    }
+                    if matches.count > limit {
+                        // Reaching the end of the page loads the next one.
+                        ProgressView()
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                            .onAppear { limit += Self.pageSize }
+                    }
+                }
+            } else {
+                ProgressView().frame(maxWidth: .infinity).padding(.top, 16)
+            }
+        }
+        .task(id: SearchKey(query: current, indexID: index.id)) {
+            let queryChanged = results?.query != current
+            // Wait for typing to pause before searching.
+            if queryChanged && results != nil && !current.text.isEmpty {
+                try? await Task.sleep(nanoseconds: 180_000_000)
+                guard !Task.isCancelled else { return }
+            }
+            let found = await Task.detached(priority: .userInitiated) {
+                index.search(current.text, in: current.sourceID)
+            }.value
+            guard !Task.isCancelled else { return }
+            if queryChanged { limit = Self.pageSize }
+            results = (index, found, current)
         }
     }
 }
@@ -120,6 +241,8 @@ struct CatalogAppDetailView: View {
         ScrollView {
             if let entry = model.entry(forKey: entryKey) {
                 content(entry).padding(16)
+            } else if !model.catalogsLoaded {
+                ProgressView().padding(32)
             } else {
                 Text("This app is no longer offered by its source.")
                     .font(Theme.mono(.subheadline)).foregroundStyle(.secondary).padding(32)
